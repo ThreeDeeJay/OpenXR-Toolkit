@@ -37,12 +37,17 @@ using System.Reflection;
 using System.Diagnostics;
 using System.Windows.Input;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Net;
+using System.Runtime.Serialization.Json;
+using System.Xml.Linq;
+using System.Xml.XPath;
 
 namespace companion
 {
     public partial class Form1 : Form
     {
-        [DllImport("XR_APILAYER_NOVENDOR_toolkit.dll", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
+        [DllImport("XR_APILAYER_MBUCCHIA_toolkit.dll", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.StdCall)]
         public static extern IntPtr getVersionString();
 
         // Must match config.cpp.
@@ -52,6 +57,8 @@ namespace companion
 
         private bool loading = true;
         private bool tracing = false;
+
+        private int keyMenuGen = 1;
 
         public Form1()
         {
@@ -73,6 +80,7 @@ namespace companion
                 key = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(RegPrefix);
 
                 // Must match the defaults in the layer!
+                keyMenuGen = (int)key.GetValue("key_menu_gen", 1);
                 safemodeCheckbox.Checked = (int)key.GetValue("safe_mode", 0) == 1 ? true : false;
                 screenshotCheckbox.Checked = (int)key.GetValue("enable_screenshot", 0) == 1 ? true : false;
                 screenshotFormat.SelectedIndex = (int)key.GetValue("screenshot_fileformat", 1);
@@ -116,6 +124,8 @@ namespace companion
                 }
             }
             ResumeLayout();
+
+            CheckForUpdates();
 
             loading = false;
         }
@@ -228,6 +238,7 @@ namespace companion
         }
 
         string versionString = null;
+        string updateAvailable = null;
 
         private unsafe void InitXr()
         {
@@ -271,7 +282,7 @@ namespace companion
                         {
                             string layerName = SilkMarshal.PtrToString(new System.IntPtr(nptr));
                             layersList += layerName + "\n";
-                            if (layerName == "XR_APILAYER_NOVENDOR_toolkit")
+                            if (layerName == "XR_APILAYER_MBUCCHIA_toolkit")
                             {
                                 found = true;
                             }
@@ -323,6 +334,46 @@ namespace companion
             GC.Collect();
         }
 
+        private void CheckForUpdates()
+        {
+            new Thread(() =>
+            {
+                Thread.CurrentThread.IsBackground = true;
+
+                string url = "https://api.github.com/repos/mbucchia/OpenXR-Toolkit/releases/latest";
+
+                // https://stackoverflow.com/questions/9620278/how-do-i-make-calls-to-a-rest-api-using-c
+                HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+                request.Method = "GET";
+                request.UserAgent = "PimaxXR/Updated";
+                try
+                {
+                    WebResponse webResponse = request.GetResponse();
+                    using (Stream webStream = webResponse.GetResponseStream() ?? Stream.Null)
+                    using (StreamReader responseReader = new StreamReader(webStream))
+                    {
+                        string response = responseReader.ReadToEnd();
+                        var jsonReader = JsonReaderWriterFactory.CreateJsonReader(Encoding.UTF8.GetBytes(response), new System.Xml.XmlDictionaryReaderQuotas());
+                        var root = XElement.Load(jsonReader);
+                        var indexOfV = versionString.LastIndexOf('v');
+                        var ourVersion = versionString.Substring(indexOfV + 1, versionString.Length - indexOfV - 2).Split('.');
+                        string tagName = root.XPathSelectElement("//tag_name").Value;
+                        var githubLatestVersion = tagName.Split('.');
+                        var ourVersionNumber = (int.Parse(ourVersion[0]) << 24) + (int.Parse(ourVersion[1]) << 16) + int.Parse(ourVersion[2]);
+                        var githubLatestVersionNumber = (int.Parse(githubLatestVersion[0]) << 24) + (int.Parse(githubLatestVersion[1]) << 16) + int.Parse(githubLatestVersion[2]);
+                        if (ourVersionNumber < githubLatestVersionNumber)
+                        {
+                            updateAvailable = tagName;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                }
+
+            }).Start();
+        }
+
         private void WriteSetting(string name, int value)
         {
             Microsoft.Win32.RegistryKey key = null;
@@ -369,7 +420,7 @@ namespace companion
 
             var assembly = Assembly.GetAssembly(GetType());
             var installPath = Path.GetDirectoryName(assembly.Location);
-            var jsonName = "XR_APILAYER_NOVENDOR_toolkit.json";
+            var jsonName = "XR_APILAYER_MBUCCHIA_toolkit.json";
             var jsonPath = installPath + "\\" + jsonName;
 
             Microsoft.Win32.RegistryKey key = null;
@@ -415,7 +466,14 @@ namespace companion
                 }
             }
 
+            var expectedValue = disableCheckbox.Checked;
+
             InitXr();
+
+            if (!expectedValue && disableCheckbox.Checked != expectedValue)
+            {
+                MessageBox.Show(this, "Failed to activate OpenXR Toolkit. This can happen when incompatible software is installed or system dependencies are missing", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void safemodeCheckbox_CheckedChanged(object sender, EventArgs e)
@@ -496,6 +554,13 @@ namespace companion
                     if (k.Item1 == (string)key.SelectedItem)
                     {
                         WriteSetting(setting, k.Item2);
+
+                        // Force the splash to appear again after changing the menu key.
+                        if (setting == "key_menu")
+                        {
+                            WriteSetting("key_menu_gen", ++keyMenuGen);
+                        }
+
                         break;
                     }
                 }
@@ -531,7 +596,7 @@ namespace companion
             var processInfo = new ProcessStartInfo();
             processInfo.Verb = "Open";
             processInfo.UseShellExecute = true;
-            processInfo.FileName = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + "\\OpenXR-Toolkit\\logs\\XR_APILAYER_NOVENDOR_toolkit.log";
+            processInfo.FileName = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData) + "\\OpenXR-Toolkit\\logs\\XR_APILAYER_MBUCCHIA_toolkit.log";
             try
             {
                 Process.Start(processInfo);
@@ -742,6 +807,11 @@ namespace companion
 
         private void timer1_Tick(object sender, EventArgs e)
         {
+            if (disableCheckbox.Checked)
+            {
+                return;
+            }
+
             Microsoft.Win32.RegistryKey key = null;
             try
             {
@@ -757,6 +827,15 @@ namespace companion
                 if (key != null)
                 {
                     key.Close();
+                }
+            }
+
+            if (updateAvailable != null)
+            {
+                updateAvailable = null;
+                if (MessageBox.Show(this, "A new version of OpenXR Toolkit is available: " + updateAvailable + ".\n\nDo you wish to open the download page?", "New version is available", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                {
+                    checkUpdatesLink_LinkClicked(null, null);
                 }
             }
         }
